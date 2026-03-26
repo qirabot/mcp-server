@@ -223,6 +223,8 @@ function registerRunTask(server: McpServer, client: QiraClient): void {
         "Do NOT use this tool when:\n" +
         "- You only need a screenshot — use take_screenshot instead.\n\n" +
         "Provide only the end goal in instruction (e.g., 'open WeChat and send a message to Zhang San'), not low-level steps.\n" +
+        "Runs synchronously by default — waits for the task to complete and returns all results in one call. " +
+        "Set wait=false to return immediately with a task ID for manual polling via get_task.\n" +
         "After completion, call take_screenshot to verify the result.",
       inputSchema: {
         device_id: z
@@ -247,9 +249,30 @@ function registerRunTask(server: McpServer, client: QiraClient): void {
           .describe(
             "Maximum number of AI decision steps (default: 30). Increase for complex multi-step tasks."
           ),
+        wait: z
+          .boolean()
+          .optional()
+          .describe(
+            "If true (default), wait for the task to complete and return results directly. " +
+            "Set to false to return immediately with a task ID for polling via get_task."
+          ),
+        timeout: z
+          .number()
+          .positive()
+          .optional()
+          .describe(
+            "Maximum seconds to wait for task completion in sync mode (default: 300). " +
+            "Only applies when wait is true. If the task is still running after this timeout, " +
+            "returns current progress and the task ID for continued polling via get_task.\n\n" +
+            "Guidelines for setting timeout based on task complexity:\n" +
+            "- Simple actions (tap, click, type): 30-60s\n" +
+            "- Moderate tasks (open app and navigate): 60-120s\n" +
+            "- Complex multi-step tasks (search, fill forms, multi-page navigation): 120-300s\n" +
+            "- Long workflows (multi-app interactions, content creation): 300-600s"
+          ),
       },
     },
-    async ({ device_id, instruction, model_alias, max_steps }) => {
+    async ({ device_id, instruction, model_alias, max_steps, wait, timeout }) => {
       const sess = await client.createSession(device_id);
 
       const params: Record<string, unknown> = { instruction };
@@ -270,13 +293,60 @@ function registerRunTask(server: McpServer, client: QiraClient): void {
         throw err;
       }
 
+      // async mode: return task ID immediately
+      if (wait === false) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Task started.\n- Task ID: \`${resp.executionId}\`\n\nUse \`get_task\` to poll for status and results.`,
+            },
+          ],
+        };
+      }
+
+      // sync mode (default): wait for completion
+      const timeoutMs = timeout !== undefined ? timeout * 1000 : undefined;
+      const result = await client.pollUntilDone(resp.executionId, undefined, timeoutMs);
+
+      const lines: string[] = [];
+      lines.push(`Task \`${result.execution.id}\`:`);
+      lines.push(`- Status: **${result.execution.status}**`);
+
+      if (result.timedOut) {
+        lines.push(
+          `- Polling timed out, task still ${result.execution.status}`
+        );
+        lines.push(
+          `- Progress: step ${result.execution.currentStep}, ${result.steps.length} step(s) completed`
+        );
+        lines.push(
+          `- Use \`get_task\` with task ID \`${result.execution.id}\` to continue tracking.`
+        );
+      }
+
+      if (result.execution.errorMessage) {
+        lines.push(`- Error: ${result.execution.errorMessage}`);
+      }
+
+      if (result.steps.length > 0) {
+        lines.push("", `### Steps (${result.steps.length})`, "");
+        for (const s of result.steps) {
+          let stepLine = `**Step ${s.stepNumber}** — ${s.actionType} [${s.status}]`;
+          if (s.decision) stepLine += `: ${s.decision}`;
+          lines.push(stepLine);
+          if (s.actionParams) lines.push(`  Params: ${s.actionParams}`);
+          if (s.actionOutput) lines.push(`  Output: ${s.actionOutput}`);
+          if (s.executionTime !== undefined) {
+            lines.push(`  Duration: ${s.executionTime}ms`);
+          }
+          lines.push("");
+        }
+      }
+
       return {
-        content: [
-          {
-            type: "text",
-            text: `Task started successfully.\n- Task ID: \`${resp.executionId}\`\n\nUse \`get_task\` to poll for status and results.`,
-          },
-        ],
+        isError: result.execution.status === "failed",
+        content: [{ type: "text", text: lines.join("\n") }],
       };
     }
   );

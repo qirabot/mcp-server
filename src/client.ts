@@ -222,6 +222,33 @@ export class QiraClient {
     );
   }
 
+  async pollUntilDone(
+    executionId: string,
+    intervalMs = 3000,
+    timeoutMs = 300_000
+  ): Promise<{
+    execution: ExecutionSummary;
+    steps: ExecutionStep[];
+    timedOut: boolean;
+  }> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const exec = await this.getExecution(executionId);
+      if (exec.status !== "pending" && exec.status !== "running") {
+        const steps = await this.getExecutionSteps(executionId).catch(
+          () => [] as ExecutionStep[]
+        );
+        return { execution: exec, steps, timedOut: false };
+      }
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+    const exec = await this.getExecution(executionId);
+    const steps = await this.getExecutionSteps(executionId).catch(
+      () => [] as ExecutionStep[]
+    );
+    return { execution: exec, steps, timedOut: true };
+  }
+
   async cancelExecution(executionId: string): Promise<void> {
     await this.request<void>(
       "POST",
