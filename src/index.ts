@@ -81,19 +81,35 @@ Cursor (remote):
   return { serverURL, apiKey, transport, port };
 }
 
-function createServer(client: QiraClient): McpServer {
+function createServer(
+  client: QiraClient,
+  shutdownSignal?: AbortSignal
+): McpServer {
   const server = new McpServer({
     name: "qira",
     version: VERSION,
   });
-  registerTools(server, client);
+  registerTools(server, client, shutdownSignal);
   return server;
 }
 
 async function startStdio(serverURL: string, apiKey: string): Promise<void> {
   const client = new QiraClient(serverURL, apiKey);
-  const server = createServer(client);
+  const shutdownController = new AbortController();
+  const server = createServer(client, shutdownController.signal);
   const transport = new StdioServerTransport();
+
+  const shutdown = () => {
+    if (!shutdownController.signal.aborted) {
+      console.error("[qira-mcp-server] pipe disconnected, cancelling tasks");
+      shutdownController.abort();
+      client.closeWebSocket();
+    }
+  };
+
+  process.stdin.on("close", shutdown);
+  transport.onclose = shutdown;
+
   await server.connect(transport);
 }
 
@@ -120,7 +136,8 @@ async function startHTTP(serverURL: string, port: number): Promise<void> {
     }
 
     const client = new QiraClient(serverURL, apiKey);
-    const server = createServer(client);
+    const shutdownController = new AbortController();
+    const server = createServer(client, shutdownController.signal);
     try {
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
@@ -128,6 +145,8 @@ async function startHTTP(serverURL: string, port: number): Promise<void> {
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
       res.on("close", () => {
+        shutdownController.abort();
+        client.closeWebSocket();
         transport.close();
         server.close();
       });

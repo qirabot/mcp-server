@@ -2,16 +2,16 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { QiraClient } from "./client.js";
 
-export function registerTools(server: McpServer, client: QiraClient): void {
+export function registerTools(
+  server: McpServer,
+  client: QiraClient,
+  shutdownSignal?: AbortSignal
+): void {
   registerListDevices(server, client);
   registerListModelAliases(server, client);
   registerTakeScreenshot(server, client);
-  registerListApps(server, client);
-  registerOpenApp(server, client);
-  registerCloseApp(server, client);
-  registerRunTask(server, client);
+  registerRunTask(server, client, shutdownSignal);
   registerGetTask(server, client);
-
   registerCancelTask(server, client);
 }
 
@@ -113,118 +113,30 @@ function registerTakeScreenshot(server: McpServer, client: QiraClient): void {
   );
 }
 
-// --- list_apps ---
-
-function registerListApps(server: McpServer, client: QiraClient): void {
-  server.registerTool(
-    "list_apps",
-    {
-      description:
-        "List installed applications on a device. Returns app names and paths/bundle IDs.\n\n" +
-        "Supported platforms: Desktop (macOS/Windows), iOS, Android.\n" +
-        "Not supported on Chrome or Sandbox devices.",
-      inputSchema: {
-        device_id: z.string().describe("The device ID to list apps from"),
-      },
-    },
-    async ({ device_id }) => {
-      const apps = await client.listApps(device_id);
-      if (apps.length === 0) {
-        return {
-          content: [{ type: "text", text: "No applications found." }],
-        };
-      }
-
-      const lines = [`Found ${apps.length} application(s):\n`];
-      for (const app of apps) {
-        lines.push(`- **${app.name}** — ${app.path}`);
-      }
-      return { content: [{ type: "text", text: lines.join("\n") }] };
-    }
-  );
-}
-
-// --- open_app ---
-
-function registerOpenApp(server: McpServer, client: QiraClient): void {
-  server.registerTool(
-    "open_app",
-    {
-      description:
-        "Open/launch an application on a device. Use list_apps first to find available app names.\n\n" +
-        "Supported platforms: Desktop (macOS/Windows), iOS, Android.\n" +
-        "On iOS/Android, use the bundle ID or package name as the app name.",
-      inputSchema: {
-        device_id: z.string().describe("The device ID to open the app on"),
-        app_name: z
-          .string()
-          .describe(
-            "Application name, path, bundle ID (iOS), or package name (Android)"
-          ),
-      },
-    },
-    async ({ device_id, app_name }) => {
-      await client.openApp(device_id, app_name);
-      return {
-        content: [
-          { type: "text", text: `Application '${app_name}' opened successfully.` },
-        ],
-      };
-    }
-  );
-}
-
-// --- close_app ---
-
-function registerCloseApp(server: McpServer, client: QiraClient): void {
-  server.registerTool(
-    "close_app",
-    {
-      description:
-        "Close/stop a running application on a device.\n\n" +
-        "Supported platforms: Desktop (macOS/Windows), iOS, Android.\n" +
-        "On iOS/Android, use the bundle ID or package name as the app name.",
-      inputSchema: {
-        device_id: z.string().describe("The device ID to close the app on"),
-        app_name: z
-          .string()
-          .describe(
-            "Application name, bundle ID (iOS), or package name (Android)"
-          ),
-      },
-    },
-    async ({ device_id, app_name }) => {
-      await client.closeApp(device_id, app_name);
-      return {
-        content: [
-          { type: "text", text: `Application '${app_name}' closed successfully.` },
-        ],
-      };
-    }
-  );
-}
-
 // --- run_task ---
 
-function registerRunTask(server: McpServer, client: QiraClient): void {
+function registerRunTask(
+  server: McpServer,
+  client: QiraClient,
+  shutdownSignal?: AbortSignal
+): void {
   server.registerTool(
     "run_task",
     {
       description:
-        "Perform UI automation on a device. This tool can automate ANY task a human can do on a device screen — " +
-        "if a human can see it and interact with it, this tool can do it. " +
-        "The underlying agent automatically analyzes screen content and decides action steps.\n\n" +
-        "Use this tool when the user asks to perform ANY action on a device, including but not limited to:\n" +
-        "- App interactions: opening apps, tapping, swiping, typing, navigating\n" +
+        "Perform UI automation on a device. The AI agent automatically handles app launching, " +
+        "screen interactions (tapping, swiping, typing, navigating), and multi-step workflows.\n\n" +
+        "Use this tool for:\n" +
+        "- Opening apps and performing tasks: 'open Chrome and search for weather'\n" +
+        "- In-app interactions: tapping, swiping, typing, navigating\n" +
         "- Content engagement: liking, commenting, sharing, following, subscribing\n" +
         "- Information gathering: reading screen content, searching, extracting data\n" +
         "- Web browsing: visiting URLs, filling forms, clicking links\n" +
         "- Messaging: sending messages, replying, forwarding\n\n" +
-        "Do NOT use this tool when:\n" +
-        "- You only need a screenshot — use take_screenshot instead.\n\n" +
-        "Provide only the end goal in instruction (e.g., 'open WeChat and send a message to Zhang San'), not low-level steps.\n" +
-        "Runs synchronously by default — waits for the task to complete and returns all results in one call. " +
-        "Set wait=false to return immediately with a task ID for manual polling via get_task.\n" +
+        "Do NOT use this tool to only take a screenshot — use take_screenshot instead.\n\n" +
+        "Provide only the end goal in instruction (e.g., 'open WeChat and send hello to Zhang San'), not low-level steps.\n" +
+        "Set wait=false to get immediately with a task ID. Use get_task to poll for status and results.\n" +
+        "Set wait=true to wait for the task to complete and return all results in one call.\n" +
         "After completion, call take_screenshot to verify the result.",
       inputSchema: {
         device_id: z
@@ -253,15 +165,15 @@ function registerRunTask(server: McpServer, client: QiraClient): void {
           .boolean()
           .optional()
           .describe(
-            "If true (default), wait for the task to complete and return results directly. " +
-            "Set to false to return immediately with a task ID for polling via get_task."
+            "If true, wait for the task to complete and return results directly. " +
+            "Defaults to false — returns immediately with a task ID for polling via get_task."
           ),
         timeout: z
           .number()
           .positive()
           .optional()
           .describe(
-            "Maximum seconds to wait for task completion in sync mode (default: 300). " +
+            "Maximum seconds to wait for task completion when wait=true (default: 90). " +
             "Only applies when wait is true. If the task is still running after this timeout, " +
             "returns current progress and the task ID for continued polling via get_task.\n\n" +
             "Guidelines for setting timeout based on task complexity:\n" +
@@ -273,6 +185,14 @@ function registerRunTask(server: McpServer, client: QiraClient): void {
       },
     },
     async ({ device_id, instruction, model_alias, max_steps, wait, timeout }) => {
+      console.error(
+        `[run_task] device_id=${device_id} wait=${wait ?? false} timeout=${timeout ?? "(none)"}s max_steps=${max_steps ?? "(none)"} model_alias=${model_alias ?? "(none)"} instruction=${instruction}`
+      );
+      // Ensure WebSocket is ready before starting task to avoid missing events
+      if (wait === true) {
+        await client.connectWebSocket().catch(() => {});
+      }
+
       const sess = await client.createSession(device_id);
 
       const params: Record<string, unknown> = { instruction };
@@ -293,8 +213,23 @@ function registerRunTask(server: McpServer, client: QiraClient): void {
         throw err;
       }
 
-      // async mode: return task ID immediately
-      if (wait === false) {
+      // Cancel server-side task when pipe disconnects
+      const onShutdown = () => {
+        console.error(
+          `[run_task] pipe disconnected, cancelling execution ${resp.executionId}`
+        );
+        client.cancelExecution(resp.executionId).catch(() => {});
+        client.closeSession(sess.id).catch(() => {});
+      };
+
+      if (shutdownSignal?.aborted) {
+        onShutdown();
+        throw new Error("Task cancelled: pipe disconnected");
+      }
+      shutdownSignal?.addEventListener("abort", onShutdown, { once: true });
+
+      // async mode (default): return task ID immediately (shutdown listener stays active)
+      if (wait !== true) {
         return {
           content: [
             {
@@ -305,49 +240,68 @@ function registerRunTask(server: McpServer, client: QiraClient): void {
         };
       }
 
-      // sync mode (default): wait for completion
-      const timeoutMs = timeout !== undefined ? timeout * 1000 : undefined;
-      const result = await client.pollUntilDone(resp.executionId, undefined, timeoutMs);
+      // sync mode (wait=true): stream via WebSocket, fall back to polling
+      try {
+        const timeoutMs = timeout !== undefined ? timeout * 1000 : undefined;
 
-      const lines: string[] = [];
-      lines.push(`Task \`${result.execution.id}\`:`);
-      lines.push(`- Status: **${result.execution.status}**`);
-
-      if (result.timedOut) {
-        lines.push(
-          `- Polling timed out, task still ${result.execution.status}`
+        const result = await client.watchExecution(
+          resp.executionId,
+          timeoutMs,
+          shutdownSignal
         );
-        lines.push(
-          `- Progress: step ${result.execution.currentStep}, ${result.steps.length} step(s) completed`
-        );
-        lines.push(
-          `- Use \`get_task\` with task ID \`${result.execution.id}\` to continue tracking.`
-        );
-      }
 
-      if (result.execution.errorMessage) {
-        lines.push(`- Error: ${result.execution.errorMessage}`);
-      }
+        shutdownSignal?.removeEventListener("abort", onShutdown);
 
-      if (result.steps.length > 0) {
-        lines.push("", `### Steps (${result.steps.length})`, "");
-        for (const s of result.steps) {
-          let stepLine = `**Step ${s.stepNumber}** — ${s.actionType} [${s.status}]`;
-          if (s.decision) stepLine += `: ${s.decision}`;
-          lines.push(stepLine);
-          if (s.actionParams) lines.push(`  Params: ${s.actionParams}`);
-          if (s.actionOutput) lines.push(`  Output: ${s.actionOutput}`);
-          if (s.executionTime !== undefined) {
-            lines.push(`  Duration: ${s.executionTime}ms`);
-          }
-          lines.push("");
+        const lines: string[] = [];
+        lines.push(`Task \`${result.execution.id}\`:`);
+        lines.push(`- Status: **${result.execution.status}**`);
+
+        if (result.timedOut) {
+          lines.push(
+            `- Timed out, task still ${result.execution.status}`
+          );
+          lines.push(
+            `- Progress: step ${result.execution.currentStep}, ${result.steps.length} step(s) completed`
+          );
+          lines.push(
+            `- Use \`get_task\` with task ID \`${result.execution.id}\` to continue tracking.`
+          );
         }
-      }
 
-      return {
-        isError: result.execution.status === "failed",
-        content: [{ type: "text", text: lines.join("\n") }],
-      };
+        if (result.execution.errorMessage) {
+          lines.push(`- Error: ${result.execution.errorMessage}`);
+        }
+
+        if (result.steps.length > 0) {
+          lines.push("", `### Steps (${result.steps.length})`, "");
+          for (const s of result.steps) {
+            let stepLine = `**Step ${s.stepNumber}** — ${s.actionType} [${s.status}]`;
+            if (s.decision) stepLine += `: ${s.decision}`;
+            lines.push(stepLine);
+            if (s.actionParams) lines.push(`  Params: ${s.actionParams}`);
+            if (s.actionOutput) lines.push(`  Output: ${s.actionOutput}`);
+            const totalTime =
+              (s.executionTime ?? 0) +
+              (s.llmDecisionTime ?? 0) +
+              (s.coordinateParseTime ?? 0);
+            if (totalTime > 0) {
+              lines.push(`  Duration: ${totalTime}ms`);
+            }
+            lines.push("");
+          }
+        }
+
+        return {
+          isError: result.execution.status === "failed",
+          content: [{ type: "text", text: lines.join("\n") }],
+        };
+      } catch (err) {
+        shutdownSignal?.removeEventListener("abort", onShutdown);
+        if (shutdownSignal?.aborted) {
+          throw new Error("Task cancelled: pipe disconnected");
+        }
+        throw err;
+      }
     }
   );
 }
@@ -389,8 +343,12 @@ function registerGetTask(server: McpServer, client: QiraClient): void {
             lines.push(stepLine);
             if (s.actionParams) lines.push(`  Params: ${s.actionParams}`);
             if (s.actionOutput) lines.push(`  Output: ${s.actionOutput}`);
-            if (s.executionTime !== undefined) {
-              lines.push(`  Duration: ${s.executionTime}ms`);
+            const totalTime =
+              (s.executionTime ?? 0) +
+              (s.llmDecisionTime ?? 0) +
+              (s.coordinateParseTime ?? 0);
+            if (totalTime > 0) {
+              lines.push(`  Duration: ${totalTime}ms`);
             }
             lines.push("");
           }

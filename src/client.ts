@@ -1,8 +1,9 @@
 /**
- * HTTP client for the server-lite REST API.
+ * HTTP + WebSocket client for the server-lite API.
  */
 
 import { Agent } from "undici";
+import WebSocket from "ws";
 
 const keepAliveDispatcher = new Agent({
   keepAliveTimeout: 30_000,
@@ -64,6 +65,8 @@ export interface ExecutionStep {
   model?: string;
   createdAt: string;
   executionTime?: number;
+  llmDecisionTime?: number;
+  coordinateParseTime?: number;
 }
 
 export interface ModelAlias {
@@ -76,14 +79,61 @@ export interface ModelAlias {
   isSystem: boolean;
 }
 
+// --- WebSocket message types ---
+
+interface WSMessage {
+  type: string;
+  executionId?: string;
+  [key: string]: unknown;
+}
+
+export interface StepCompletePayload {
+  executionId: string;
+  stepNumber: number;
+  actionType: string;
+  actionParams?: string;
+  status: string;
+  decision?: string;
+  error?: string;
+  executionTime?: number;
+  llmDecisionTime?: number;
+  coordinateParseTime?: number;
+  model?: string;
+}
+
+export interface ExecutionEndPayload {
+  executionId: string;
+  status: string;
+  error?: string;
+}
+
+export interface WatchResult {
+  execution: ExecutionSummary;
+  steps: ExecutionStep[];
+  timedOut: boolean;
+}
+
+export type StepCallback = (step: StepCompletePayload) => void;
+
 export class QiraClient {
   private baseURL: string;
   private apiKey: string;
+  private ws: WebSocket | null = null;
+  private wsReady: Promise<void> | null = null;
+  private executionListeners = new Map<
+    string,
+    {
+      onStep: (payload: StepCompletePayload) => void;
+      onEnd: (payload: ExecutionEndPayload) => void;
+    }
+  >();
 
   constructor(baseURL: string, apiKey: string) {
     this.baseURL = baseURL.replace(/\/+$/, "");
     this.apiKey = apiKey;
   }
+
+  // --- HTTP helpers ---
 
   private async request<T>(
     method: string,
@@ -153,35 +203,221 @@ export class QiraClient {
     return { data, contentType };
   }
 
+  // --- WebSocket ---
+
+  private wsURL(): string {
+    const base = this.baseURL.replace(/^http/, "ws");
+    return `${base}/api/v1/executions/ws`;
+  }
+
+  connectWebSocket(): Promise<void> {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      return Promise.resolve();
+    }
+    if (this.wsReady) {
+      return this.wsReady;
+    }
+
+    this.wsReady = new Promise<void>((resolve, reject) => {
+      const url = this.wsURL();
+      const ws = new WebSocket(url, [`bearer.${this.apiKey}`]);
+
+      const timeout = setTimeout(() => {
+        ws.close();
+        reject(new Error("WebSocket connection timeout"));
+      }, 10_000);
+
+      ws.on("open", () => {
+        clearTimeout(timeout);
+        this.ws = ws;
+        this.wsReady = null;
+        console.error("[qira-mcp-server] websocket connected");
+        resolve();
+      });
+
+      ws.on("message", (raw: WebSocket.RawData) => {
+        try {
+          const msg = JSON.parse(raw.toString()) as WSMessage;
+          this.handleWSMessage(msg);
+        } catch {
+          // ignore malformed messages
+        }
+      });
+
+      ws.on("close", () => {
+        this.ws = null;
+        this.wsReady = null;
+      });
+
+      ws.on("error", (err) => {
+        clearTimeout(timeout);
+        this.ws = null;
+        this.wsReady = null;
+        reject(err);
+      });
+    });
+
+    return this.wsReady;
+  }
+
+  private handleWSMessage(msg: WSMessage): void {
+    const execId = msg.executionId as string | undefined;
+    if (!execId) return;
+
+    const listener = this.executionListeners.get(execId);
+    if (!listener) return;
+
+    switch (msg.type) {
+      case "step_complete":
+        listener.onStep(msg as unknown as StepCompletePayload);
+        break;
+      case "execution_complete":
+      case "execution_failed":
+      case "execution_cancelled":
+        listener.onEnd(msg as unknown as ExecutionEndPayload);
+        break;
+    }
+  }
+
+  closeWebSocket(): void {
+    if (this.ws) {
+      this.ws.close(1000, "normal");
+      this.ws = null;
+    }
+  }
+
+  /**
+   * Watch an execution via WebSocket, receiving real-time step updates.
+   * Falls back to HTTP polling if WebSocket is unavailable.
+   */
+  async watchExecution(
+    executionId: string,
+    timeoutMs = 90_000,
+    signal?: AbortSignal,
+    onStep?: StepCallback
+  ): Promise<WatchResult> {
+    // Try WebSocket first
+    try {
+      await this.connectWebSocket();
+    } catch {
+      console.error(
+        "[qira-mcp-server] websocket unavailable, falling back to polling"
+      );
+      return this.pollUntilDone(executionId, 3000, timeoutMs, signal);
+    }
+
+    return new Promise<WatchResult>((resolve, reject) => {
+      const steps: ExecutionStep[] = [];
+      let settled = false;
+
+      const cleanup = () => {
+        this.executionListeners.delete(executionId);
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+      };
+
+      const settle = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        fn();
+      };
+
+      // Timeout
+      const timer = setTimeout(async () => {
+        settle(async () => {
+          const exec = await this.getExecution(executionId).catch(() => ({
+            id: executionId,
+            status: "running",
+            currentStep: steps.length,
+            executionSource: "mcp",
+            createdAt: "",
+          }));
+          resolve({ execution: exec, steps, timedOut: true });
+        });
+      }, timeoutMs);
+
+      // Abort signal
+      const onAbort = () => {
+        settle(() => reject(new Error("aborted")));
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+
+      if (signal?.aborted) {
+        settle(() => reject(new Error("aborted")));
+        return;
+      }
+
+      // Register execution listener
+      this.executionListeners.set(executionId, {
+        onStep: (payload) => {
+          const step: ExecutionStep = {
+            id: 0,
+            executionId: payload.executionId,
+            stepNumber: payload.stepNumber,
+            actionType: payload.actionType,
+            status: payload.status,
+            decision: payload.decision,
+            actionParams: payload.actionParams,
+            createdAt: "",
+            executionTime: payload.executionTime,
+            llmDecisionTime: payload.llmDecisionTime,
+            coordinateParseTime: payload.coordinateParseTime,
+          };
+          steps.push(step);
+          onStep?.(payload);
+        },
+        onEnd: async (payload) => {
+          settle(async () => {
+            const exec = await this.getExecution(executionId).catch(() => ({
+              id: executionId,
+              status: payload.status,
+              currentStep: steps.length,
+              executionSource: "mcp",
+              errorMessage: payload.error,
+              createdAt: "",
+            }));
+            resolve({ execution: exec, steps, timedOut: false });
+          });
+        },
+      });
+
+      // Also check if already completed (race condition: task finished before listener registered)
+      this.getExecution(executionId).then((exec) => {
+        if (
+          exec.status !== "pending" &&
+          exec.status !== "running"
+        ) {
+          this.getExecutionSteps(executionId)
+            .catch(() => [] as ExecutionStep[])
+            .then((fetchedSteps) => {
+              settle(() =>
+                resolve({
+                  execution: exec,
+                  steps: fetchedSteps,
+                  timedOut: false,
+                })
+              );
+            });
+        }
+      });
+    });
+  }
+
+  // --- REST API methods ---
+
   async listActiveDevices(): Promise<DeviceInfo[]> {
     return this.request<DeviceInfo[]>("GET", "/api/v1/devices/active");
+  }
+
+  async getDevice(deviceId: string): Promise<DeviceInfo> {
+    return this.request<DeviceInfo>("GET", `/api/v1/devices/${deviceId}`);
   }
 
   async takeDeviceScreenshot(
     deviceId: string
   ): Promise<{ data: Buffer; contentType: string }> {
     return this.requestRaw("GET", `/api/v1/devices/${deviceId}/screenshot`);
-  }
-
-  async listApps(deviceId: string): Promise<{ name: string; path: string }[]> {
-    return this.request<{ name: string; path: string }[]>(
-      "GET",
-      `/api/v1/devices/${deviceId}/apps`
-    );
-  }
-
-  async openApp(deviceId: string, appName: string): Promise<void> {
-    await this.request<void>("POST", `/api/v1/devices/${deviceId}/apps/open`, {
-      appName,
-    });
-  }
-
-  async closeApp(deviceId: string, appName: string): Promise<void> {
-    await this.request<void>(
-      "POST",
-      `/api/v1/devices/${deviceId}/apps/close`,
-      { appName }
-    );
   }
 
   async createSession(deviceId: string): Promise<SessionResponse> {
@@ -225,14 +461,14 @@ export class QiraClient {
   async pollUntilDone(
     executionId: string,
     intervalMs = 3000,
-    timeoutMs = 300_000
-  ): Promise<{
-    execution: ExecutionSummary;
-    steps: ExecutionStep[];
-    timedOut: boolean;
-  }> {
+    timeoutMs = 90_000,
+    signal?: AbortSignal
+  ): Promise<WatchResult> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      if (signal?.aborted) {
+        throw new Error("aborted");
+      }
       const exec = await this.getExecution(executionId);
       if (exec.status !== "pending" && exec.status !== "running") {
         const steps = await this.getExecutionSteps(executionId).catch(
@@ -240,7 +476,24 @@ export class QiraClient {
         );
         return { execution: exec, steps, timedOut: false };
       }
-      await new Promise((r) => setTimeout(r, intervalMs));
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          cleanup();
+          resolve();
+        }, intervalMs);
+
+        function onAbort() {
+          clearTimeout(timer);
+          cleanup();
+          reject(new Error("aborted"));
+        }
+
+        function cleanup() {
+          signal?.removeEventListener("abort", onAbort);
+        }
+
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
     }
     const exec = await this.getExecution(executionId);
     const steps = await this.getExecutionSteps(executionId).catch(
