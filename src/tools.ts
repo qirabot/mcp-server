@@ -56,7 +56,7 @@ function registerListModelAliases(
     "list_model_aliases",
     {
       description:
-        "List available model aliases (e.g. 'balanced', 'high_quality'). Use the alias name as the model_alias parameter in run_task.",
+        "List available model aliases (e.g. 'gemini-vertex-balanced', 'claude-vertex-fast'). Use the alias name as the model_alias parameter in run_task.",
     },
     async () => {
       const aliases = await client.listModelAliases();
@@ -151,7 +151,7 @@ function registerRunTask(
           .string()
           .optional()
           .describe(
-            "Model alias to use (e.g. 'balanced'). Use list_model_aliases to see available options."
+            "Model alias to use (e.g. 'gemini-vertex-balanced'). Use list_model_aliases to see available options."
           ),
         max_steps: z
           .number()
@@ -216,9 +216,9 @@ function registerRunTask(
       // Cancel server-side task when pipe disconnects
       const onShutdown = () => {
         console.error(
-          `[run_task] pipe disconnected, cancelling execution ${resp.executionId}`
+          `[run_task] pipe disconnected, cancelling task ${resp.taskId}`
         );
-        client.cancelExecution(resp.executionId).catch(() => {});
+        client.cancelTask(resp.taskId).catch(() => {});
         client.closeSession(sess.id).catch(() => {});
       };
 
@@ -234,7 +234,7 @@ function registerRunTask(
           content: [
             {
               type: "text",
-              text: `Task started.\n- Task ID: \`${resp.executionId}\`\n\nUse \`get_task\` to poll for status and results.`,
+              text: `Task started.\n- Task ID: \`${resp.taskId}\`\n\nUse \`get_task\` to poll for status and results.`,
             },
           ],
         };
@@ -244,8 +244,8 @@ function registerRunTask(
       try {
         const timeoutMs = timeout !== undefined ? timeout * 1000 : undefined;
 
-        const result = await client.watchExecution(
-          resp.executionId,
+        const result = await client.watchTask(
+          resp.taskId,
           timeoutMs,
           shutdownSignal
         );
@@ -253,23 +253,23 @@ function registerRunTask(
         shutdownSignal?.removeEventListener("abort", onShutdown);
 
         const lines: string[] = [];
-        lines.push(`Task \`${result.execution.id}\`:`);
-        lines.push(`- Status: **${result.execution.status}**`);
+        lines.push(`Task \`${result.task.id}\`:`);
+        lines.push(`- Status: **${result.task.status}**`);
 
         if (result.timedOut) {
           lines.push(
-            `- Timed out, task still ${result.execution.status}`
+            `- Timed out, task still ${result.task.status}`
           );
           lines.push(
-            `- Progress: step ${result.execution.currentStep}, ${result.steps.length} step(s) completed`
+            `- Progress: step ${result.task.currentStep}, ${result.steps.length} step(s) completed`
           );
           lines.push(
-            `- Use \`get_task\` with task ID \`${result.execution.id}\` to continue tracking.`
+            `- Use \`get_task\` with task ID \`${result.task.id}\` to continue tracking.`
           );
         }
 
-        if (result.execution.errorMessage) {
-          lines.push(`- Error: ${result.execution.errorMessage}`);
+        if (result.task.errorMessage) {
+          lines.push(`- Error: ${result.task.errorMessage}`);
         }
 
         if (result.steps.length > 0) {
@@ -281,7 +281,8 @@ function registerRunTask(
             if (s.actionParams) lines.push(`  Params: ${s.actionParams}`);
             if (s.actionOutput) lines.push(`  Output: ${s.actionOutput}`);
             const totalTime =
-              (s.executionTime ?? 0) +
+              s.stepDuration ??
+              (s.actionDurationTime ?? 0) +
               (s.llmDecisionTime ?? 0) +
               (s.coordinateParseTime ?? 0);
             if (totalTime > 0) {
@@ -292,7 +293,7 @@ function registerRunTask(
         }
 
         return {
-          isError: result.execution.status === "failed",
+          isError: result.task.status === "failed",
           content: [{ type: "text", text: lines.join("\n") }],
         };
       } catch (err) {
@@ -323,7 +324,7 @@ function registerGetTask(server: McpServer, client: QiraClient): void {
       },
     },
     async ({ task_id }) => {
-      const exec = await client.getExecution(task_id);
+      const exec = await client.getTask(task_id);
 
       const lines: string[] = [];
       lines.push(`Task \`${exec.id}\`:`);
@@ -334,7 +335,7 @@ function registerGetTask(server: McpServer, client: QiraClient): void {
       }
 
       try {
-        const steps = await client.getExecutionSteps(task_id);
+        const steps = await client.getTaskSteps(task_id);
         if (steps.length > 0) {
           lines.push("", `### Steps (${steps.length})`, "");
           for (const s of steps) {
@@ -344,7 +345,8 @@ function registerGetTask(server: McpServer, client: QiraClient): void {
             if (s.actionParams) lines.push(`  Params: ${s.actionParams}`);
             if (s.actionOutput) lines.push(`  Output: ${s.actionOutput}`);
             const totalTime =
-              (s.executionTime ?? 0) +
+              s.stepDuration ??
+              (s.actionDurationTime ?? 0) +
               (s.llmDecisionTime ?? 0) +
               (s.coordinateParseTime ?? 0);
             if (totalTime > 0) {
@@ -379,7 +381,7 @@ function registerCancelTask(server: McpServer, client: QiraClient): void {
       },
     },
     async ({ task_id }) => {
-      await client.cancelExecution(task_id);
+      await client.cancelTask(task_id);
       return {
         content: [{ type: "text", text: "Task cancelled successfully." }],
       };

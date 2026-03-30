@@ -36,25 +36,24 @@ export interface TaskAction {
 }
 
 export interface RunTaskResponse {
-  executionId: string;
+  taskId: string;
   message: string;
 }
 
-export interface ExecutionSummary {
+export interface TaskSummary {
   id: string;
   status: string;
   currentStep: number;
-  executionSource: string;
+  source: string;
   errorMessage?: string;
   deviceId?: string;
   createdAt: string;
-  startedAt?: string;
   completedAt?: string;
 }
 
-export interface ExecutionStep {
+export interface TaskStep {
   id: number;
-  executionId: string;
+  taskId: string;
   stepNumber: number;
   actionType: string;
   status: string;
@@ -64,7 +63,8 @@ export interface ExecutionStep {
   screenshotPath?: string;
   model?: string;
   createdAt: string;
-  executionTime?: number;
+  actionDurationTime?: number;
+  stepDuration?: number;
   llmDecisionTime?: number;
   coordinateParseTime?: number;
 }
@@ -83,33 +83,34 @@ export interface ModelAlias {
 
 interface WSMessage {
   type: string;
-  executionId?: string;
+  taskId?: string;
   [key: string]: unknown;
 }
 
 export interface StepCompletePayload {
-  executionId: string;
+  taskId: string;
   stepNumber: number;
   actionType: string;
   actionParams?: string;
   status: string;
   decision?: string;
   error?: string;
-  executionTime?: number;
+  actionDurationTime?: number;
+  stepDuration?: number;
   llmDecisionTime?: number;
   coordinateParseTime?: number;
   model?: string;
 }
 
-export interface ExecutionEndPayload {
-  executionId: string;
+export interface TaskEndPayload {
+  taskId: string;
   status: string;
   error?: string;
 }
 
 export interface WatchResult {
-  execution: ExecutionSummary;
-  steps: ExecutionStep[];
+  task: TaskSummary;
+  steps: TaskStep[];
   timedOut: boolean;
 }
 
@@ -120,11 +121,11 @@ export class QiraClient {
   private apiKey: string;
   private ws: WebSocket | null = null;
   private wsReady: Promise<void> | null = null;
-  private executionListeners = new Map<
+  private taskListeners = new Map<
     string,
     {
       onStep: (payload: StepCompletePayload) => void;
-      onEnd: (payload: ExecutionEndPayload) => void;
+      onEnd: (payload: TaskEndPayload) => void;
     }
   >();
 
@@ -207,7 +208,7 @@ export class QiraClient {
 
   private wsURL(): string {
     const base = this.baseURL.replace(/^http/, "ws");
-    return `${base}/api/v1/executions/ws`;
+    return `${base}/api/v1/tasks/ws`;
   }
 
   connectWebSocket(): Promise<void> {
@@ -261,20 +262,20 @@ export class QiraClient {
   }
 
   private handleWSMessage(msg: WSMessage): void {
-    const execId = msg.executionId as string | undefined;
-    if (!execId) return;
+    const taskId = msg.taskId as string | undefined;
+    if (!taskId) return;
 
-    const listener = this.executionListeners.get(execId);
+    const listener = this.taskListeners.get(taskId);
     if (!listener) return;
 
     switch (msg.type) {
       case "step_complete":
         listener.onStep(msg as unknown as StepCompletePayload);
         break;
-      case "execution_complete":
-      case "execution_failed":
-      case "execution_cancelled":
-        listener.onEnd(msg as unknown as ExecutionEndPayload);
+      case "task_complete":
+      case "task_failed":
+      case "task_cancelled":
+        listener.onEnd(msg as unknown as TaskEndPayload);
         break;
     }
   }
@@ -287,11 +288,11 @@ export class QiraClient {
   }
 
   /**
-   * Watch an execution via WebSocket, receiving real-time step updates.
+   * Watch a task via WebSocket, receiving real-time step updates.
    * Falls back to HTTP polling if WebSocket is unavailable.
    */
-  async watchExecution(
-    executionId: string,
+  async watchTask(
+    taskId: string,
     timeoutMs = 90_000,
     signal?: AbortSignal,
     onStep?: StepCallback
@@ -303,15 +304,15 @@ export class QiraClient {
       console.error(
         "[qira-mcp-server] websocket unavailable, falling back to polling"
       );
-      return this.pollUntilDone(executionId, 3000, timeoutMs, signal);
+      return this.pollUntilDone(taskId, 3000, timeoutMs, signal);
     }
 
     return new Promise<WatchResult>((resolve, reject) => {
-      const steps: ExecutionStep[] = [];
+      const steps: TaskStep[] = [];
       let settled = false;
 
       const cleanup = () => {
-        this.executionListeners.delete(executionId);
+        this.taskListeners.delete(taskId);
         clearTimeout(timer);
         signal?.removeEventListener("abort", onAbort);
       };
@@ -326,14 +327,14 @@ export class QiraClient {
       // Timeout
       const timer = setTimeout(async () => {
         settle(async () => {
-          const exec = await this.getExecution(executionId).catch(() => ({
-            id: executionId,
+          const exec = await this.getTask(taskId).catch(() => ({
+            id: taskId,
             status: "running",
             currentStep: steps.length,
-            executionSource: "mcp",
+            source: "mcp",
             createdAt: "",
           }));
-          resolve({ execution: exec, steps, timedOut: true });
+          resolve({ task: exec, steps, timedOut: true });
         });
       }, timeoutMs);
 
@@ -348,19 +349,19 @@ export class QiraClient {
         return;
       }
 
-      // Register execution listener
-      this.executionListeners.set(executionId, {
+      // Register task listener
+      this.taskListeners.set(taskId, {
         onStep: (payload) => {
-          const step: ExecutionStep = {
+          const step: TaskStep = {
             id: 0,
-            executionId: payload.executionId,
+            taskId: payload.taskId,
             stepNumber: payload.stepNumber,
             actionType: payload.actionType,
             status: payload.status,
             decision: payload.decision,
             actionParams: payload.actionParams,
             createdAt: "",
-            executionTime: payload.executionTime,
+            actionDurationTime: payload.actionDurationTime,
             llmDecisionTime: payload.llmDecisionTime,
             coordinateParseTime: payload.coordinateParseTime,
           };
@@ -369,31 +370,31 @@ export class QiraClient {
         },
         onEnd: async (payload) => {
           settle(async () => {
-            const exec = await this.getExecution(executionId).catch(() => ({
-              id: executionId,
+            const exec = await this.getTask(taskId).catch(() => ({
+              id: taskId,
               status: payload.status,
               currentStep: steps.length,
-              executionSource: "mcp",
+              source: "mcp",
               errorMessage: payload.error,
               createdAt: "",
             }));
-            resolve({ execution: exec, steps, timedOut: false });
+            resolve({ task: exec, steps, timedOut: false });
           });
         },
       });
 
       // Also check if already completed (race condition: task finished before listener registered)
-      this.getExecution(executionId).then((exec) => {
+      this.getTask(taskId).then((exec) => {
         if (
           exec.status !== "pending" &&
           exec.status !== "running"
         ) {
-          this.getExecutionSteps(executionId)
-            .catch(() => [] as ExecutionStep[])
+          this.getTaskSteps(taskId)
+            .catch(() => [] as TaskStep[])
             .then((fetchedSteps) => {
               settle(() =>
                 resolve({
-                  execution: exec,
+                  task: exec,
                   steps: fetchedSteps,
                   timedOut: false,
                 })
@@ -441,25 +442,25 @@ export class QiraClient {
     if (modelAlias) {
       body.modelAlias = modelAlias;
     }
-    return this.request<RunTaskResponse>("POST", "/api/v1/task/run", body);
+    return this.request<RunTaskResponse>("POST", "/api/v1/tasks/run", body);
   }
 
-  async getExecution(executionId: string): Promise<ExecutionSummary> {
-    return this.request<ExecutionSummary>(
+  async getTask(taskId: string): Promise<TaskSummary> {
+    return this.request<TaskSummary>(
       "GET",
-      `/api/v1/executions/${executionId}`
+      `/api/v1/tasks/${taskId}`
     );
   }
 
-  async getExecutionSteps(executionId: string): Promise<ExecutionStep[]> {
-    return this.request<ExecutionStep[]>(
+  async getTaskSteps(taskId: string): Promise<TaskStep[]> {
+    return this.request<TaskStep[]>(
       "GET",
-      `/api/v1/executions/${executionId}/steps`
+      `/api/v1/tasks/${taskId}/steps`
     );
   }
 
   async pollUntilDone(
-    executionId: string,
+    taskId: string,
     intervalMs = 3000,
     timeoutMs = 90_000,
     signal?: AbortSignal
@@ -469,12 +470,12 @@ export class QiraClient {
       if (signal?.aborted) {
         throw new Error("aborted");
       }
-      const exec = await this.getExecution(executionId);
+      const exec = await this.getTask(taskId);
       if (exec.status !== "pending" && exec.status !== "running") {
-        const steps = await this.getExecutionSteps(executionId).catch(
-          () => [] as ExecutionStep[]
+        const steps = await this.getTaskSteps(taskId).catch(
+          () => [] as TaskStep[]
         );
-        return { execution: exec, steps, timedOut: false };
+        return { task: exec, steps, timedOut: false };
       }
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => {
@@ -495,17 +496,17 @@ export class QiraClient {
         signal?.addEventListener("abort", onAbort, { once: true });
       });
     }
-    const exec = await this.getExecution(executionId);
-    const steps = await this.getExecutionSteps(executionId).catch(
-      () => [] as ExecutionStep[]
+    const exec = await this.getTask(taskId);
+    const steps = await this.getTaskSteps(taskId).catch(
+      () => [] as TaskStep[]
     );
-    return { execution: exec, steps, timedOut: true };
+    return { task: exec, steps, timedOut: true };
   }
 
-  async cancelExecution(executionId: string): Promise<void> {
+  async cancelTask(taskId: string): Promise<void> {
     await this.request<void>(
       "POST",
-      `/api/v1/executions/${executionId}/cancel`
+      `/api/v1/tasks/${taskId}/cancel`
     );
   }
 
