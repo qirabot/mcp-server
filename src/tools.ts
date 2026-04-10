@@ -56,7 +56,7 @@ function registerListModelAliases(
     "list_model_aliases",
     {
       description:
-        "List available model aliases (e.g. 'gemini-vertex-balanced', 'claude-vertex-fast'). Use the alias name as the model_alias parameter in run_task.",
+        "List available model aliases (e.g. 'balanced', 'high-quality'). Use the alias name as the model_alias parameter in run_task.",
     },
     async () => {
       const aliases = await client.listModelAliases();
@@ -151,7 +151,7 @@ function registerRunTask(
           .string()
           .optional()
           .describe(
-            "Model alias to use (e.g. 'gemini-vertex-balanced'). Use list_model_aliases to see available options."
+            "Model alias to use (e.g. 'balanced'). Use list_model_aliases to see available options."
           ),
         max_steps: z
           .number()
