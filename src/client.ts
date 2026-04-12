@@ -275,6 +275,7 @@ export class QiraClient {
       case "task_complete":
       case "task_failed":
       case "task_cancelled":
+      case "task_timeout":
         listener.onEnd(msg as unknown as TaskEndPayload);
         break;
     }
