@@ -1,9 +1,8 @@
 /**
- * HTTP + WebSocket client for the server-lite API.
+ * HTTP client for the server-lite API.
  */
 
 import { Agent } from "undici";
-import WebSocket from "ws";
 
 const keepAliveDispatcher = new Agent({
   keepAliveTimeout: 30_000,
@@ -79,55 +78,9 @@ export interface ModelAlias {
   isSystem: boolean;
 }
 
-// --- WebSocket message types ---
-
-interface WSMessage {
-  type: string;
-  taskId?: string;
-  [key: string]: unknown;
-}
-
-export interface StepCompletePayload {
-  taskId: string;
-  stepNumber: number;
-  actionType: string;
-  actionParams?: string;
-  status: string;
-  decision?: string;
-  error?: string;
-  actionDurationTime?: number;
-  stepDuration?: number;
-  llmDecisionTime?: number;
-  coordinateParseTime?: number;
-  model?: string;
-}
-
-export interface TaskEndPayload {
-  taskId: string;
-  status: string;
-  error?: string;
-}
-
-export interface WatchResult {
-  task: TaskSummary;
-  steps: TaskStep[];
-  timedOut: boolean;
-}
-
-export type StepCallback = (step: StepCompletePayload) => void;
-
 export class QiraClient {
   private baseURL: string;
   private apiKey: string;
-  private ws: WebSocket | null = null;
-  private wsReady: Promise<void> | null = null;
-  private taskListeners = new Map<
-    string,
-    {
-      onStep: (payload: StepCompletePayload) => void;
-      onEnd: (payload: TaskEndPayload) => void;
-    }
-  >();
 
   constructor(baseURL: string, apiKey: string) {
     this.baseURL = baseURL.replace(/\/+$/, "");
@@ -204,208 +157,6 @@ export class QiraClient {
     return { data, contentType };
   }
 
-  // --- WebSocket ---
-
-  private wsURL(): string {
-    const base = this.baseURL.replace(/^http/, "ws");
-    return `${base}/api/v1/tasks/ws`;
-  }
-
-  connectWebSocket(): Promise<void> {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      return Promise.resolve();
-    }
-    if (this.wsReady) {
-      return this.wsReady;
-    }
-
-    this.wsReady = new Promise<void>((resolve, reject) => {
-      const url = this.wsURL();
-      const ws = new WebSocket(url, [`bearer.${this.apiKey}`]);
-
-      const timeout = setTimeout(() => {
-        ws.close();
-        reject(new Error("WebSocket connection timeout"));
-      }, 10_000);
-
-      ws.on("open", () => {
-        clearTimeout(timeout);
-        this.ws = ws;
-        this.wsReady = null;
-        console.error("[qira-mcp-server] websocket connected");
-        resolve();
-      });
-
-      ws.on("message", (raw: WebSocket.RawData) => {
-        try {
-          const msg = JSON.parse(raw.toString()) as WSMessage;
-          this.handleWSMessage(msg);
-        } catch {
-          // ignore malformed messages
-        }
-      });
-
-      ws.on("close", () => {
-        this.ws = null;
-        this.wsReady = null;
-      });
-
-      ws.on("error", (err) => {
-        clearTimeout(timeout);
-        this.ws = null;
-        this.wsReady = null;
-        reject(err);
-      });
-    });
-
-    return this.wsReady;
-  }
-
-  private handleWSMessage(msg: WSMessage): void {
-    const taskId = msg.taskId as string | undefined;
-    if (!taskId) return;
-
-    const listener = this.taskListeners.get(taskId);
-    if (!listener) return;
-
-    switch (msg.type) {
-      case "step_complete":
-        listener.onStep(msg as unknown as StepCompletePayload);
-        break;
-      case "task_complete":
-      case "task_failed":
-      case "task_cancelled":
-      case "task_timeout":
-        listener.onEnd(msg as unknown as TaskEndPayload);
-        break;
-    }
-  }
-
-  closeWebSocket(): void {
-    if (this.ws) {
-      this.ws.close(1000, "normal");
-      this.ws = null;
-    }
-  }
-
-  /**
-   * Watch a task via WebSocket, receiving real-time step updates.
-   * Falls back to HTTP polling if WebSocket is unavailable.
-   */
-  async watchTask(
-    taskId: string,
-    timeoutMs = 90_000,
-    signal?: AbortSignal,
-    onStep?: StepCallback
-  ): Promise<WatchResult> {
-    // Try WebSocket first
-    try {
-      await this.connectWebSocket();
-    } catch {
-      console.error(
-        "[qira-mcp-server] websocket unavailable, falling back to polling"
-      );
-      return this.pollUntilDone(taskId, 3000, timeoutMs, signal);
-    }
-
-    return new Promise<WatchResult>((resolve, reject) => {
-      const steps: TaskStep[] = [];
-      let settled = false;
-
-      const cleanup = () => {
-        this.taskListeners.delete(taskId);
-        clearTimeout(timer);
-        signal?.removeEventListener("abort", onAbort);
-      };
-
-      const settle = (fn: () => void) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        fn();
-      };
-
-      // Timeout
-      const timer = setTimeout(async () => {
-        settle(async () => {
-          const exec = await this.getTask(taskId).catch(() => ({
-            id: taskId,
-            status: "running",
-            currentStep: steps.length,
-            source: "mcp",
-            createdAt: "",
-          }));
-          resolve({ task: exec, steps, timedOut: true });
-        });
-      }, timeoutMs);
-
-      // Abort signal
-      const onAbort = () => {
-        settle(() => reject(new Error("aborted")));
-      };
-      signal?.addEventListener("abort", onAbort, { once: true });
-
-      if (signal?.aborted) {
-        settle(() => reject(new Error("aborted")));
-        return;
-      }
-
-      // Register task listener
-      this.taskListeners.set(taskId, {
-        onStep: (payload) => {
-          const step: TaskStep = {
-            id: 0,
-            taskId: payload.taskId,
-            stepNumber: payload.stepNumber,
-            actionType: payload.actionType,
-            status: payload.status,
-            decision: payload.decision,
-            actionParams: payload.actionParams,
-            createdAt: "",
-            actionDurationTime: payload.actionDurationTime,
-            llmDecisionTime: payload.llmDecisionTime,
-            coordinateParseTime: payload.coordinateParseTime,
-          };
-          steps.push(step);
-          onStep?.(payload);
-        },
-        onEnd: async (payload) => {
-          settle(async () => {
-            const exec = await this.getTask(taskId).catch(() => ({
-              id: taskId,
-              status: payload.status,
-              currentStep: steps.length,
-              source: "mcp",
-              errorMessage: payload.error,
-              createdAt: "",
-            }));
-            resolve({ task: exec, steps, timedOut: false });
-          });
-        },
-      });
-
-      // Also check if already completed (race condition: task finished before listener registered)
-      this.getTask(taskId).then((exec) => {
-        if (
-          exec.status !== "pending" &&
-          exec.status !== "running"
-        ) {
-          this.getTaskSteps(taskId)
-            .catch(() => [] as TaskStep[])
-            .then((fetchedSteps) => {
-              settle(() =>
-                resolve({
-                  task: exec,
-                  steps: fetchedSteps,
-                  timedOut: false,
-                })
-              );
-            });
-        }
-      });
-    });
-  }
-
   // --- REST API methods ---
 
   async listActiveDevices(): Promise<DeviceInfo[]> {
@@ -458,50 +209,6 @@ export class QiraClient {
       "GET",
       `/api/v1/tasks/${taskId}/steps`
     );
-  }
-
-  async pollUntilDone(
-    taskId: string,
-    intervalMs = 3000,
-    timeoutMs = 90_000,
-    signal?: AbortSignal
-  ): Promise<WatchResult> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      if (signal?.aborted) {
-        throw new Error("aborted");
-      }
-      const exec = await this.getTask(taskId);
-      if (exec.status !== "pending" && exec.status !== "running") {
-        const steps = await this.getTaskSteps(taskId).catch(
-          () => [] as TaskStep[]
-        );
-        return { task: exec, steps, timedOut: false };
-      }
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          cleanup();
-          resolve();
-        }, intervalMs);
-
-        function onAbort() {
-          clearTimeout(timer);
-          cleanup();
-          reject(new Error("aborted"));
-        }
-
-        function cleanup() {
-          signal?.removeEventListener("abort", onAbort);
-        }
-
-        signal?.addEventListener("abort", onAbort, { once: true });
-      });
-    }
-    const exec = await this.getTask(taskId);
-    const steps = await this.getTaskSteps(taskId).catch(
-      () => [] as TaskStep[]
-    );
-    return { task: exec, steps, timedOut: true };
   }
 
   async cancelTask(taskId: string): Promise<void> {

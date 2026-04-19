@@ -135,8 +135,7 @@ function registerRunTask(
         "- Messaging: sending messages, replying, forwarding\n\n" +
         "Do NOT use this tool to only take a screenshot — use take_screenshot instead.\n\n" +
         "Provide only the end goal in instruction (e.g., 'open WeChat and send hello to Zhang San'), not low-level steps.\n" +
-        "Set wait=false to get immediately with a task ID. Use get_task to poll for status and results.\n" +
-        "Set wait=true to wait for the task to complete and return all results in one call.\n" +
+        "Returns immediately with a task ID. Use get_task to poll for status and results.\n" +
         "After completion, call take_screenshot to verify the result.",
       inputSchema: {
         device_id: z
@@ -161,37 +160,12 @@ function registerRunTask(
           .describe(
             "Maximum number of AI decision steps (default: 30). Increase for complex multi-step tasks."
           ),
-        wait: z
-          .boolean()
-          .optional()
-          .describe(
-            "If true, wait for the task to complete and return results directly. " +
-            "Defaults to false — returns immediately with a task ID for polling via get_task."
-          ),
-        timeout: z
-          .number()
-          .positive()
-          .optional()
-          .describe(
-            "Maximum seconds to wait for task completion when wait=true (default: 90). " +
-            "Only applies when wait is true. If the task is still running after this timeout, " +
-            "returns current progress and the task ID for continued polling via get_task.\n\n" +
-            "Guidelines for setting timeout based on task complexity:\n" +
-            "- Simple actions (tap, click, type): 30-60s\n" +
-            "- Moderate tasks (open app and navigate): 60-120s\n" +
-            "- Complex multi-step tasks (search, fill forms, multi-page navigation): 120-300s\n" +
-            "- Long workflows (multi-app interactions, content creation): 300-600s"
-          ),
       },
     },
-    async ({ device_id, instruction, model_alias, max_steps, wait, timeout }) => {
+    async ({ device_id, instruction, model_alias, max_steps }) => {
       console.error(
-        `[run_task] device_id=${device_id} wait=${wait ?? false} timeout=${timeout ?? "(none)"}s max_steps=${max_steps ?? "(none)"} model_alias=${model_alias ?? "(none)"} instruction=${instruction}`
+        `[run_task] device_id=${device_id} max_steps=${max_steps ?? "(none)"} model_alias=${model_alias ?? "(none)"} instruction=${instruction}`
       );
-      // Ensure WebSocket is ready before starting task to avoid missing events
-      if (wait === true) {
-        await client.connectWebSocket().catch(() => {});
-      }
 
       const sess = await client.createSession(device_id);
 
@@ -228,81 +202,14 @@ function registerRunTask(
       }
       shutdownSignal?.addEventListener("abort", onShutdown, { once: true });
 
-      // async mode (default): return task ID immediately (shutdown listener stays active)
-      if (wait !== true) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Task started.\n- Task ID: \`${resp.taskId}\`\n\nUse \`get_task\` to poll for status and results.`,
-            },
-          ],
-        };
-      }
-
-      // sync mode (wait=true): stream via WebSocket, fall back to polling
-      try {
-        const timeoutMs = timeout !== undefined ? timeout * 1000 : undefined;
-
-        const result = await client.watchTask(
-          resp.taskId,
-          timeoutMs,
-          shutdownSignal
-        );
-
-        shutdownSignal?.removeEventListener("abort", onShutdown);
-
-        const lines: string[] = [];
-        lines.push(`Task \`${result.task.id}\`:`);
-        lines.push(`- Status: **${result.task.status}**`);
-
-        if (result.timedOut) {
-          lines.push(
-            `- Timed out, task still ${result.task.status}`
-          );
-          lines.push(
-            `- Progress: step ${result.task.currentStep}, ${result.steps.length} step(s) completed`
-          );
-          lines.push(
-            `- Use \`get_task\` with task ID \`${result.task.id}\` to continue tracking.`
-          );
-        }
-
-        if (result.task.errorMessage) {
-          lines.push(`- Error: ${result.task.errorMessage}`);
-        }
-
-        if (result.steps.length > 0) {
-          lines.push("", `### Steps (${result.steps.length})`, "");
-          for (const s of result.steps) {
-            let stepLine = `**Step ${s.stepNumber}** — ${s.actionType} [${s.status}]`;
-            if (s.decision) stepLine += `: ${s.decision}`;
-            lines.push(stepLine);
-            if (s.actionParams) lines.push(`  Params: ${s.actionParams}`);
-            if (s.actionOutput) lines.push(`  Output: ${s.actionOutput}`);
-            const totalTime =
-              s.stepDuration ??
-              (s.actionDurationTime ?? 0) +
-              (s.llmDecisionTime ?? 0) +
-              (s.coordinateParseTime ?? 0);
-            if (totalTime > 0) {
-              lines.push(`  Duration: ${totalTime}ms`);
-            }
-            lines.push("");
-          }
-        }
-
-        return {
-          isError: result.task.status === "failed",
-          content: [{ type: "text", text: lines.join("\n") }],
-        };
-      } catch (err) {
-        shutdownSignal?.removeEventListener("abort", onShutdown);
-        if (shutdownSignal?.aborted) {
-          throw new Error("Task cancelled: pipe disconnected");
-        }
-        throw err;
-      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Task started.\n- Task ID: \`${resp.taskId}\`\n\nUse \`get_task\` to poll for status and results.`,
+          },
+        ],
+      };
     }
   );
 }

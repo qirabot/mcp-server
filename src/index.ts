@@ -103,7 +103,6 @@ async function startStdio(serverURL: string, apiKey: string): Promise<void> {
     if (!shutdownController.signal.aborted) {
       console.error("[qira-mcp-server] pipe disconnected, cancelling tasks");
       shutdownController.abort();
-      client.closeWebSocket();
     }
   };
 
@@ -146,7 +145,6 @@ async function startHTTP(serverURL: string, port: number): Promise<void> {
       await transport.handleRequest(req, res, req.body);
       res.on("close", () => {
         shutdownController.abort();
-        client.closeWebSocket();
         transport.close();
         server.close();
       });
