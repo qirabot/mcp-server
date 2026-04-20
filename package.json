@@ -1,6 +1,6 @@
 {
   "name": "@qirabot/mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Qira MCP server — AI-driven device automation for Claude, Cursor, and other MCP clients",
   "type": "module",
   "bin": {
