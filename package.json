@@ -18,6 +18,14 @@
     "ai"
   ],
   "license": "MIT",
+  "homepage": "https://qirabot.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qirabot/mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/qirabot/mcp-server/issues"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.28.0",
     "express": "^5.2.1",

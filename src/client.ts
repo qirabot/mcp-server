@@ -41,6 +41,7 @@ export interface RunTaskResponse {
 
 export interface TaskSummary {
   id: string;
+  name?: string;
   status: string;
   currentStep: number;
   source: string;
