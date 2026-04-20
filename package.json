@@ -1,0 +1,50 @@
+{
+  "name": "@qirabot/mcp",
+  "version": "0.1.0",
+  "description": "Qira MCP server — AI-driven device automation for Claude, Cursor, and other MCP clients",
+  "type": "module",
+  "bin": {
+    "qira-mcp-server": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js"
+  },
+  "keywords": [
+    "mcp",
+    "qira",
+    "device-automation",
+    "ai"
+  ],
+  "license": "MIT",
+  "homepage": "https://qirabot.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qirabot/mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/qirabot/mcp-server/issues"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "express": "^5.2.1",
+    "undici": "^7.24.6",
+    "ws": "^8.20.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^24.4.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "~5.8.3"
+  },
+  "pnpm": {
+    "overrides": {
+      "hono": ">=4.12.14",
+      "@hono/node-server": ">=1.19.13",
+      "path-to-regexp": ">=8.4.0"
+    }
+  },
+  "packageManager": "pnpm@10.22.0+sha512.bf049efe995b28f527fd2b41ae0474ce29186f7edcb3bf545087bd61fbbebb2bf75362d1307fda09c2d288e1e499787ac12d4fcb617a974718a6051f2eee741c"
+}
