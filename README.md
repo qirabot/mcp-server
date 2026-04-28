@@ -10,6 +10,15 @@ Control mobile and desktop devices with natural language through your AI assista
 npm install -g @qirabot/mcp
 ```
 
+## Configuration
+
+1. Sign up at [qirabot.com](https://qirabot.com) and get your API key from the dashboard.
+2. Set it as an environment variable:
+
+```bash
+export QIRA_API_KEY="qk_your_api_key"
+```
+
 ## Setup
 
 ### Claude Desktop
@@ -21,7 +30,9 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
   "mcpServers": {
     "qira": {
       "command": "qira-mcp-server",
-      "args": ["--server", "https://app.qirabot.com", "--api-key", "qk_your_api_key"]
+      "env": {
+        "QIRA_API_KEY": "qk_your_api_key"
+      }
     }
   }
 }
@@ -30,7 +41,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 ### Claude Code
 
 ```bash
-claude mcp add qira -- qira-mcp-server --server https://app.qirabot.com --api-key qk_your_api_key
+claude mcp add qira -- qira-mcp-server --api-key $QIRA_API_KEY
 ```
 
 ### Cursor
@@ -42,7 +53,9 @@ Add to your Cursor MCP settings (`.cursor/mcp.json`):
   "mcpServers": {
     "qira": {
       "command": "qira-mcp-server",
-      "args": ["--server", "https://app.qirabot.com", "--api-key", "qk_your_api_key"]
+      "env": {
+        "QIRA_API_KEY": "qk_your_api_key"
+      }
     }
   }
 }
@@ -53,7 +66,7 @@ Add to your Cursor MCP settings (`.cursor/mcp.json`):
 For shared or remote deployments, run the server in HTTP mode:
 
 ```bash
-qira-mcp-server --server https://app.qirabot.com --transport http --port 3100
+qira-mcp-server --transport http --port 3100
 ```
 
 Clients connect with API key in the header:
@@ -98,7 +111,7 @@ Once configured, you can ask your AI assistant:
 qira-mcp-server [options]
 
 Options:
-  --server, -s      Qira server URL (or QIRA_SERVER_URL env)
+  --server, -s      Server URL (default: https://app.qirabot.com, or QIRA_SERVER_URL env)
   --api-key, -k     API key (required for stdio; or QIRA_API_KEY env)
   --transport, -t   Transport mode: "stdio" (default) or "http"
   --port, -p        HTTP server port (default: 3100)
@@ -109,7 +122,7 @@ Options:
 
 | Variable | Description |
 |----------|-------------|
-| `QIRA_SERVER_URL` | Server URL (alternative to `--server`) |
+| `QIRA_SERVER_URL` | Server URL (default: `https://app.qirabot.com`) |
 | `QIRA_API_KEY` | API key (alternative to `--api-key`) |
 
 ## License

@@ -7,7 +7,7 @@ import express from "express";
 import { QiraClient } from "./client.js";
 import { registerTools } from "./tools.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.2";
 const API_KEY_HEADER = "x-qira-api-key";
 
 interface Config {
@@ -19,7 +19,7 @@ interface Config {
 
 function parseArgs(): Config {
   const args = process.argv.slice(2);
-  let serverURL = process.env.QIRA_SERVER_URL ?? "";
+  let serverURL = process.env.QIRA_SERVER_URL ?? "https://app.qirabot.com";
   let apiKey = process.env.QIRA_API_KEY ?? "";
   let transport: "stdio" | "http" = "stdio";
   let port = 3100;
@@ -43,13 +43,13 @@ function parseArgs(): Config {
 
 Usage:
   # Local stdio mode — api-key required at startup
-  qira-mcp-server --server <url> --api-key <key>
+  qira-mcp-server --api-key <key>
 
   # Remote HTTP mode — api-key passed per-request via ${API_KEY_HEADER} header
-  qira-mcp-server --server <url> --transport http [--port 3100]
+  qira-mcp-server --transport http [--port 3100]
 
 Options:
-  --server, -s      Server-lite base URL (or QIRA_SERVER_URL env)
+  --server, -s      Server base URL (default: https://app.qirabot.com, or QIRA_SERVER_URL env)
   --api-key, -k     API key (required for stdio; ignored for http)
   --transport, -t   Transport mode: "stdio" (default) or "http"
   --port, -p        HTTP server port (default: 3100, only for http mode)
@@ -62,13 +62,6 @@ Cursor (remote):
   { "mcpServers": { "qira": { "url": "https://your-server/mcp", "headers": { "${API_KEY_HEADER}": "YOUR_API_KEY" } } } }`);
       process.exit(0);
     }
-  }
-
-  if (!serverURL) {
-    console.error(
-      "Error: --server is required (or set QIRA_SERVER_URL)"
-    );
-    process.exit(1);
   }
 
   if (transport === "stdio" && !apiKey) {
